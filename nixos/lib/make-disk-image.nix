@@ -163,6 +163,7 @@ To solve this, you can run `fdisk -l $image` and generate `dd if=$image of=$imag
   onlyNixStore ? false
 
 , name ? "nixos-disk-image"
+, outprefix ? "nixos"
 
 , # Disk image format, one of qcow2, qcow2-compressed, vdi, vpc, raw.
   format ? "raw"
@@ -214,7 +215,7 @@ let format' = format; in let
 
   compress = optionalString (format' == "qcow2-compressed") "-c";
 
-  filename = "nixos." + {
+  filename = "${outprefix}." + {
     qcow2 = "qcow2";
     vdi   = "vdi";
     vpc   = "vhd";

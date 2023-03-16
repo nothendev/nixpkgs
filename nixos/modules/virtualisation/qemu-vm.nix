@@ -114,7 +114,7 @@ let
 
       NIX_DISK_IMAGE=$(readlink -f "''${NIX_DISK_IMAGE:-${toString config.virtualisation.diskImage}}") || test -z "$NIX_DISK_IMAGE"
 
-      if test -n "$NIX_DISK_IMAGE" && ! test -e "$NIX_DISK_IMAGE"; then
+      if ! test -e "$NIX_DISK_IMAGE"; then
           echo "Disk image do not exist, creating the virtualisation disk image..."
           # If we are using a bootloader and default filesystems layout.
           # We have to reuse the system image layout as a backing image format (CoW)
@@ -128,7 +128,7 @@ let
           # FIXME: raise this issue to upstream.
           ${qemu}/bin/qemu-img create \
           ${concatStringsSep " \\\n" ([ "-f qcow2" ]
-          ++ optional (cfg.useBootLoader && cfg.useDefaultFilesystems) "-F qcow2 -b ${systemImage}/nixos.qcow2"
+          ++ optional (cfg.useBootLoader && cfg.useDefaultFilesystems) "-F qcow2 -b ${systemImage}/${config.system.name}.qcow2"
           ++ optional (!(cfg.useBootLoader && cfg.useDefaultFilesystems)) "-o size=${toString config.virtualisation.diskSize}M"
           ++ [ "$NIX_DISK_IMAGE" ])}
           echo "Virtualisation disk image created."
@@ -143,7 +143,7 @@ let
         (if cfg.writableStore
           then ''
             # Create a writable copy/snapshot of the store image.
-            ${qemu}/bin/qemu-img create -f qcow2 -F qcow2 -b ${storeImage}/nixos.qcow2 "$TMPDIR"/store.img
+            ${qemu}/bin/qemu-img create -f qcow2 -F qcow2 -b ${storeImage}/${config.system.name}.qcow2 "$TMPDIR"/store.img
           ''
           else ''
             (
@@ -174,10 +174,10 @@ let
         if ${if !cfg.persistBootDevice then "true" else "! test -e $TMPDIR/disk.img"}; then
           # Create a writable copy/snapshot of the boot disk.
           # A writable boot disk can be booted from automatically.
-          ${qemu}/bin/qemu-img create -f qcow2 -F qcow2 -b ${bootDisk}/disk.img "$TMPDIR/disk.img"
+          ${qemu}/bin/qemu-img create -f qcow2 -F qcow2 -b ${systemImage}/${config.system.name}.qcow2 "$TMPDIR/disk.img"
         fi
 
-        NIX_EFI_VARS=$(readlink -f "''${NIX_EFI_VARS:-${config.system.name}-${cfg.efiVars}}")
+        NIX_EFI_VARS=$(readlink -f "''${NIX_EFI_VARS:-${config.system.name}-vars.fd}")
 
         ${lib.optionalString cfg.useEFIBoot
         ''
@@ -233,6 +233,7 @@ let
     additionalSpace = "0M";
     copyChannel = false;
     OVMF = cfg.efi.OVMF;
+    outprefix = config.system.name;
   };
 
   # This image is supposed to have no side-effects on the system image.
@@ -248,6 +249,7 @@ let
     diskSize = "auto";
     additionalSpace = "0M";
     copyChannel = false;
+    outprefix = config.system.name;
   };
 
 in
@@ -1030,41 +1032,43 @@ in
             [ "trans=virtio" "version=9p2000.L"  "msize=${toString cfg.msize}" ]
             ++ lib.optional (tag == "nix-store") "cache=loose";
         };
-    in
-      mkVMOverride (cfg.fileSystems //
-      optionalAttrs cfg.useDefaultFilesystems {
-        # cfg.useBootLoader -> [ boot partition ; root partition ] layout on *root* disk
-        "/".device = cfg.rootDevice;
-        "/".fsType = "ext4";
-        "/".autoFormat = true;
-      } //
-      optionalAttrs config.boot.tmpOnTmpfs {
-        "/tmp" = {
+    in lib.mkMerge [
+      (lib.mapAttrs' mkSharedDir cfg.sharedDirectories)
+      {
+        "/" = lib.mkIf cfg.useDefaultFilesystems (if cfg.diskImage == null then {
+          device = "tmpfs";
+          fsType = "tmpfs";
+        } else {
+          # cfg.useBootLoader -> [ boot partition ; root partition ] layout on *root* disk
+          device = cfg.rootDevice;
+          fsType = "ext4";
+          autoFormat = true;
+      });
+      "/tmp" = lib.mkIf config.boot.tmpOnTmpfs {
           device = "tmpfs";
           fsType = "tmpfs";
           neededForBoot = true;
           # Sync with systemd's tmp.mount;
           options = [ "mode=1777" "strictatime" "nosuid" "nodev" "size=${toString config.boot.tmpOnTmpfsSize}" ];
-        };
-        "/nix/${if cfg.writableStore then ".ro-store" else "store"}" = lib.mkIf cfg.useNixStoreImage {
-          device = "${lookupDriveDeviceName "nix-store" cfg.qemu.drives}";
-          neededForBoot = true;
-          options = [ "ro" ];
-        };
-        "/nix/.rw-store" = lib.mkIf (cfg.writableStore && cfg.writableStoreUseTmpfs) {
-          fsType = "tmpfs";
-          options = [ "mode=0755" ];
-          neededForBoot = true;
-        };
-      } //
-      optionalAttrs (cfg.useBootLoader && cfg.bootPartition != null) {
-        # see note [Disk layout with `useBootLoader`]
-        "/boot" = {
-          device = cfg.bootPartition; # 1 for e.g. `vda1`, as created in `systemImage`
-          fsType = "vfat";
-          noCheck = true; # fsck fails on a r/o filesystem
-        };
-      });
+      };
+      "/nix/${if cfg.writableStore then ".ro-store" else "store"}" = lib.mkIf cfg.useNixStoreImage {
+        device = "${lookupDriveDeviceName "nix-store" cfg.qemu.drives}";
+        neededForBoot = true;
+        options = [ "ro" ];
+      };
+      "/nix/.rw-store" = lib.mkIf (cfg.writableStore && cfg.writableStoreUseTmpfs) {
+        fsType = "tmpfs";
+        options = [ "mode=0755" ];
+        neededForBoot = true;
+      };
+      # see note [Disk layout with `useBootLoader`]
+      "/boot" = lib.mkIf (cfg.useBootLoader && cfg.bootPartition != null) {
+        device = cfg.bootPartition; # 1 for e.g. `vda1`, as created in `systemImage`
+        fsType = "vfat";
+        noCheck = true; # fsck fails on a r/o filesystem
+      };
+    }
+  ];
 
     boot.initrd.systemd = lib.mkIf (config.boot.initrd.systemd.enable && cfg.writableStore) {
       mounts = [{
