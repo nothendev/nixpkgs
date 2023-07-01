@@ -259,7 +259,7 @@ in
             allowSubstitutes = false;
           };
           generateCompletions = package: pkgs.runCommand
-            "${package.name}_fish-completions"
+            "${pkgs.getName package}_fish-completions"
             (
               {
                 inherit package;
